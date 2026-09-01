@@ -1,13 +1,24 @@
 import asyncio
 import os
 import random
+import time
+
 from pixivpy3 import AppPixivAPI
 
 _api = None
+_auth_time = 0.0
+_AUTH_TTL = 1800  # 30분마다 토큰 선제 갱신 (Pixiv 액세스 토큰은 1시간이면 만료)
+
+
+class PixivError(Exception):
+    """Pixiv API 호출 실패. '결과 없음'과 반드시 구분해야 합니다."""
+
 
 def get_api(force_reauth: bool = False) -> AppPixivAPI | None:
-    global _api
-    if _api is not None and not force_reauth:
+    global _api, _auth_time
+
+    fresh = _api is not None and (time.time() - _auth_time) < _AUTH_TTL
+    if fresh and not force_reauth:
         return _api
 
     refresh_token = os.getenv("PIXIV_REFRESH_TOKEN")
@@ -16,13 +27,16 @@ def get_api(force_reauth: bool = False) -> AppPixivAPI | None:
         return None
 
     try:
-        _api = AppPixivAPI()
-        _api.auth(refresh_token=refresh_token)
-        print("[Pixiv] 인증 성공")
+        api = AppPixivAPI()
+        api.auth(refresh_token=refresh_token)
+        _api = api
+        _auth_time = time.time()
+        print("[Pixiv] 인증 성공 (토큰 갱신)")
         return _api
     except Exception as e:
         print(f"[Pixiv] 인증 실패: {e}")
         _api = None
+        _auth_time = 0.0
         return None
 
 
@@ -32,10 +46,7 @@ def _make_image_url(illust: dict) -> str | None:
     if illust.get("type") == "ugoira":
         return None
 
-    # 단일 페이지 이미지
     urls = illust.get("image_urls", {})
-
-    # large → medium → square_medium 순으로 시도
     url = (
         urls.get("large")
         or urls.get("medium")
@@ -72,53 +83,74 @@ def _build_result(illust: dict) -> dict | None:
     }
 
 
+def _search_sync(query: str, offset: int, safe: bool, sort: str) -> list[dict]:
+    api = get_api()
+    if api is None:
+        raise PixivError("Pixiv 인증 실패 (PIXIV_REFRESH_TOKEN 확인 필요)")
+
+    result = api.search_illust(
+        query,
+        search_target="exact_match_for_tags",
+        sort=sort,
+        offset=offset,
+    )
+
+    if result is None:
+        raise PixivError("Pixiv 응답이 비어 있습니다")
+    if result.get("error"):
+        raise PixivError(f"Pixiv API 오류: {result.get('error')}")
+    if "illusts" not in result:
+        raise PixivError(f"예상치 못한 응답 형식: {list(result.keys())[:5]}")
+
+    illusts = result.get("illusts") or []
+    if safe:
+        illusts = [i for i in illusts if i.get("x_restrict") == 0]
+
+    results = []
+    for illust in illusts:
+        item = _build_result(illust)
+        if item:
+            results.append(item)
+    return results
+
+
 async def fetch_batch(query: str, offset: int = 0, safe: bool = False, sort: str = "date_asc") -> list[dict]:
-    def _fetch():
-        api = get_api()
-        if api is None:
-            return []
+    """성공 시 리스트를 반환합니다.
 
-        result = api.search_illust(
-            query,
-            search_target="exact_match_for_tags",
-            sort=sort,
-            offset=offset,
-        )
-
-        illusts = result.get("illusts", [])
-        if safe:
-            illusts = [i for i in illusts if i.get("x_restrict") == 0]
-
-        results = []
-        for illust in illusts:
-            item = _build_result(illust)
-            if item:
-                results.append(item)
-        return results
-
+    빈 리스트 = 정말로 결과가 없음.
+    실패 = PixivError 발생 (호출부가 '결과 없음'으로 오해하지 않도록).
+    """
     loop = asyncio.get_running_loop()
-    try:
-        return await asyncio.wait_for(loop.run_in_executor(None, _fetch), timeout=30.0)
-    except asyncio.TimeoutError:
-        print("[Pixiv] 요청 타임아웃 → 토큰 재인증 후 재시도")
-        get_api(force_reauth=True)
+    last_err: Exception | None = None
+
+    for attempt in range(3):
+        if attempt > 0:
+            get_api(force_reauth=True)
+            await asyncio.sleep(3 * attempt)
         try:
-            return await asyncio.wait_for(loop.run_in_executor(None, _fetch), timeout=30.0)
-        except Exception as e2:
-            print(f"[Pixiv] 재시도 실패: {e2}")
-            return []
-    except Exception as e:
-        print(f"[Pixiv] fetch_batch 오류: {e} → 토큰 재인증 시도")
-        get_api(force_reauth=True)
-        try:
-            return await asyncio.wait_for(loop.run_in_executor(None, _fetch), timeout=30.0)
-        except Exception as e2:
-            print(f"[Pixiv] 재시도 실패: {e2}")
-            return []
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, _search_sync, query, offset, safe, sort),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            last_err = PixivError("요청 타임아웃 (30초)")
+            print(f"[Pixiv] 타임아웃 (시도 {attempt + 1}/3)")
+        except PixivError as e:
+            last_err = e
+            print(f"[Pixiv] {e} (시도 {attempt + 1}/3)")
+        except Exception as e:
+            last_err = PixivError(f"{type(e).__name__}: {e}")
+            print(f"[Pixiv] 오류: {e} (시도 {attempt + 1}/3)")
+
+    raise last_err or PixivError("알 수 없는 오류")
 
 
 async def search(query: str, safe: bool = True) -> dict | None:
-    results = await fetch_batch(query, safe=safe)
+    try:
+        results = await fetch_batch(query, safe=safe)
+    except PixivError as e:
+        print(f"[Pixiv] search 실패: {e}")
+        return None
     if not results:
         return None
     return random.choice(results)

@@ -147,10 +147,19 @@ class ImageSearch(commands.Cog):
         """5초마다 이미지를 가져와서 채널에 올립니다."""
         await feed.channel.send(f"🔍 **{feed.query}** 이미지 피드를 시작합니다!")
         consecutive_errors = 0
+        posted = 0
 
         while True:
             try:
                 if not feed.queue:
+                    # Pixiv API는 offset 약 5000까지만 지원 → 첫 바퀴 종료 처리
+                    if not feed.first_pass_done and feed.offset >= 5000:
+                        feed.first_pass_done = True
+                        feed.offset = 0
+                        await feed.channel.send("✅ 검색 결과를 끝까지 다 봤어요. 이제 새로 올라오는 이미지만 보여드릴게요!")
+                        await asyncio.sleep(30)
+                        continue
+
                     # 첫 바퀴: 오래된 순, 이후: 최신 순으로 새 이미지만
                     sort = "date_asc" if not feed.first_pass_done else "date_desc"
                     batch = await pixiv.fetch_batch(feed.query, offset=feed.offset, sort=sort)
@@ -179,12 +188,33 @@ class ImageSearch(commands.Cog):
                 embed = self._build_embed(item)
                 await feed.channel.send(embed=embed)
                 consecutive_errors = 0  # 성공 시 에러 카운트 초기화
+                posted += 1
+                if posted % 20 == 0:
+                    print(f"[피드] {feed.query}: {posted}장 업로드됨 "
+                          f"(대기열 {len(feed.queue)}, offset {feed.offset})")
 
-            except discord.HTTPException as e:
-                print(f"[피드] Discord 오류: {e}")
-                consecutive_errors += 1
             except asyncio.CancelledError:
                 return
+            except pixiv.PixivError as e:
+                consecutive_errors += 1
+                print(f"[피드] Pixiv 오류 ({consecutive_errors}/5): {e}")
+                if consecutive_errors >= 5:
+                    await feed.channel.send(
+                        f"⚠️ Pixiv 연결이 계속 실패해서 피드를 중단했어요.\n"
+                        f"오류 내용: `{e}`\n"
+                        f"`/이미지재시작` 으로 다시 시도해보세요."
+                    )
+                    return
+                await asyncio.sleep(min(60, 10 * consecutive_errors))
+                continue
+            except discord.HTTPException as e:
+                consecutive_errors += 1
+                print(f"[피드] Discord 오류 ({consecutive_errors}/5): {e}")
+                if consecutive_errors >= 5:
+                    print(f"[피드] {feed.query}: Discord 오류 5회 → 피드 중단")
+                    return
+                await asyncio.sleep(min(60, 10 * consecutive_errors))
+                continue
             except Exception as e:
                 print(f"[피드] 오류: {e}")
                 consecutive_errors += 1
