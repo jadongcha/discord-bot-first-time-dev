@@ -190,11 +190,7 @@ class ImageSearch(commands.Cog):
                 consecutive_errors += 1
                 if consecutive_errors >= 5:
                     await feed.channel.send(
-                        f"⚠️ 오류가 계속 발생해서 피드를 중단했어요.
-"
-                        f"오류 내용: `{e}`
-"
-                        f"봇을 재시작하거나 Pixiv 토큰을 갱신해주세요."
+                        f"⚠️ 오류가 계속 발생해서 피드를 중단했어요.\n오류 내용: `{e}`\n봇을 재시작하거나 Pixiv 토큰을 갱신해주세요."
                     )
                     return
 
