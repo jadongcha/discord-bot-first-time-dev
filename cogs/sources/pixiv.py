@@ -80,7 +80,7 @@ async def fetch_batch(query: str, offset: int = 0, safe: bool = False, sort: str
 
         result = api.search_illust(
             query,
-            search_target="partial_match_for_tags",
+            search_target="title_and_caption",
             sort=sort,
             offset=offset,
         )
