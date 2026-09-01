@@ -116,6 +116,7 @@ class ImageSearch(commands.Cog):
     async def _run_feed(self, feed: ImageFeed):
         """5초마다 이미지를 가져와서 채널에 올립니다."""
         await feed.channel.send(f"🔍 **{feed.query}** 이미지 피드를 시작합니다!")
+        consecutive_errors = 0
 
         while True:
             try:
@@ -124,7 +125,6 @@ class ImageSearch(commands.Cog):
                     feed.offset += 30
 
                     new_items = [item for item in batch if item["id"] not in feed.seen_ids]
-                    # 큐에 이미 있는 것도 제외
                     queued_ids = {i["id"] for i in feed.queue}
                     new_items = [item for item in new_items if item["id"] not in queued_ids]
                     feed.queue.extend(new_items)
@@ -140,13 +140,25 @@ class ImageSearch(commands.Cog):
 
                 embed = self._build_embed(item)
                 await feed.channel.send(embed=embed)
+                consecutive_errors = 0  # 성공 시 에러 카운트 초기화
 
             except discord.HTTPException as e:
                 print(f"[피드] Discord 오류: {e}")
+                consecutive_errors += 1
             except asyncio.CancelledError:
                 return
             except Exception as e:
                 print(f"[피드] 오류: {e}")
+                consecutive_errors += 1
+                if consecutive_errors >= 5:
+                    await feed.channel.send(
+                        f"⚠️ 오류가 계속 발생해서 피드를 중단했어요.
+"
+                        f"오류 내용: `{e}`
+"
+                        f"봇을 재시작하거나 Pixiv 토큰을 갱신해주세요."
+                    )
+                    return
 
             await asyncio.sleep(5)
 
