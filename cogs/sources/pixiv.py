@@ -72,7 +72,7 @@ def _build_result(illust: dict) -> dict | None:
     }
 
 
-async def fetch_batch(query: str, offset: int = 0, safe: bool = True) -> list[dict]:
+async def fetch_batch(query: str, offset: int = 0, safe: bool = False, sort: str = "date_asc") -> list[dict]:
     def _fetch():
         api = get_api()
         if api is None:
@@ -81,7 +81,7 @@ async def fetch_batch(query: str, offset: int = 0, safe: bool = True) -> list[di
         result = api.search_illust(
             query,
             search_target="partial_match_for_tags",
-            sort="popular_desc",
+            sort=sort,
             offset=offset,
         )
 
@@ -96,14 +96,22 @@ async def fetch_batch(query: str, offset: int = 0, safe: bool = True) -> list[di
                 results.append(item)
         return results
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
-        return await loop.run_in_executor(None, _fetch)
+        return await asyncio.wait_for(loop.run_in_executor(None, _fetch), timeout=30.0)
+    except asyncio.TimeoutError:
+        print("[Pixiv] 요청 타임아웃 → 토큰 재인증 후 재시도")
+        get_api(force_reauth=True)
+        try:
+            return await asyncio.wait_for(loop.run_in_executor(None, _fetch), timeout=30.0)
+        except Exception as e2:
+            print(f"[Pixiv] 재시도 실패: {e2}")
+            return []
     except Exception as e:
         print(f"[Pixiv] fetch_batch 오류: {e} → 토큰 재인증 시도")
         get_api(force_reauth=True)
         try:
-            return await loop.run_in_executor(None, _fetch)
+            return await asyncio.wait_for(loop.run_in_executor(None, _fetch), timeout=30.0)
         except Exception as e2:
             print(f"[Pixiv] 재시도 실패: {e2}")
             return []

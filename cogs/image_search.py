@@ -15,6 +15,7 @@ class ImageFeed:
         self.seen_ids: set[int] = set()
         self.queue: list[dict] = []
         self.offset: int = 0
+        self.first_pass_done: bool = False  # 첫 바퀴 완료 여부
         self.task: asyncio.Task | None = None
 
 
@@ -58,6 +59,7 @@ class ImageSearch(commands.Cog):
                 overwrites=overwrites,
                 category=category,  # 카테고리 없으면 None → 최상단에 생성
                 topic=f"🖼️ '{검색어}' 이미지 피드 | /이미지중지 로 중지",
+                nsfw=True,
                 reason=f"이미지 피드: {검색어}",
             )
         except discord.Forbidden:
@@ -93,6 +95,34 @@ class ImageSearch(commands.Cog):
         await self._stop_feed(channel_id)
         await interaction.response.send_message("⏹️ 이미지 피드를 중지했어요.", ephemeral=True)
 
+    @app_commands.command(name="이미지재시작", description="현재 채널에서 이미지 피드를 다시 시작합니다.")
+    async def restart_slash(self, interaction: discord.Interaction):
+        channel_id = interaction.channel_id
+        channel = interaction.channel
+
+        # 기존 피드가 있으면 중지
+        if channel_id in self.feeds:
+            old_feed = self.feeds[channel_id]
+            query = old_feed.query
+            await self._stop_feed(channel_id)
+        else:
+            await interaction.response.send_message(
+                "이 채널에서 실행된 이미지 피드 정보가 없어요. `/이미지` 로 새로 시작해주세요.", ephemeral=True
+            )
+            return
+
+        # 같은 검색어로 재시작 (seen_ids는 query_history에 유지됨)
+        feed = ImageFeed(channel, query)
+        if query not in self.query_history:
+            self.query_history[query] = set()
+        feed.seen_ids = self.query_history[query]
+        self.feeds[channel.id] = feed
+        feed.task = asyncio.create_task(self._run_feed(feed))
+
+        await interaction.response.send_message(
+            f"🔄 **{query}** 이미지 피드를 재시작했어요!", ephemeral=True
+        )
+
     @app_commands.command(name="채널삭제", description="현재 이미지 피드 채널을 삭제합니다.")
     async def delete_slash(self, interaction: discord.Interaction):
         channel_id = interaction.channel_id
@@ -121,7 +151,9 @@ class ImageSearch(commands.Cog):
         while True:
             try:
                 if not feed.queue:
-                    batch = await pixiv.fetch_batch(feed.query, offset=feed.offset)
+                    # 첫 바퀴: 오래된 순, 이후: 최신 순으로 새 이미지만
+                    sort = "date_asc" if not feed.first_pass_done else "date_desc"
+                    batch = await pixiv.fetch_batch(feed.query, offset=feed.offset, sort=sort)
                     feed.offset += 30
 
                     new_items = [item for item in batch if item["id"] not in feed.seen_ids]
@@ -130,9 +162,15 @@ class ImageSearch(commands.Cog):
                     feed.queue.extend(new_items)
 
                     if not feed.queue:
-                        feed.offset = 0
-                        feed.seen_ids.clear()
-                        await asyncio.sleep(10)
+                        if not feed.first_pass_done:
+                            # 첫 바퀴 완료 → 이후 최신 순으로 새 이미지만 체크
+                            feed.first_pass_done = True
+                            feed.offset = 0
+                            await feed.channel.send("✅ 모든 이미지를 한 번씩 올렸어요. 이제 새로 올라오는 이미지만 보여드릴게요!")
+                        else:
+                            # 새 이미지 없음 → 30초 후 다시 체크
+                            feed.offset = 0
+                        await asyncio.sleep(30)
                         continue
 
                 item = feed.queue.pop(0)
