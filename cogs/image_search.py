@@ -22,6 +22,7 @@ class ImageSearch(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.feeds: dict[int, ImageFeed] = {}  # channel_id → ImageFeed
+        self.query_history: dict[str, set[int]] = {}  # 검색어 → seen_ids (채널 삭제 후에도 유지)
 
     # ──────────────────────────────────────────
     # 슬래시 명령어
@@ -66,6 +67,10 @@ class ImageSearch(commands.Cog):
             return
 
         feed = ImageFeed(channel, 검색어)
+        # 이전에 본 이미지 기록 연결 (같은 검색어면 중복 방지)
+        if 검색어 not in self.query_history:
+            self.query_history[검색어] = set()
+        feed.seen_ids = self.query_history[검색어]
         self.feeds[channel.id] = feed
         feed.task = asyncio.create_task(self._run_feed(feed))
 
@@ -85,12 +90,22 @@ class ImageSearch(commands.Cog):
             )
             return
 
-        channel = interaction.channel
         await self._stop_feed(channel_id)
-        await interaction.response.send_message("⏹️ 이미지 피드를 중지하고 채널을 삭제할게요.", ephemeral=True)
-        await asyncio.sleep(2)
+        await interaction.response.send_message("⏹️ 이미지 피드를 중지했어요.", ephemeral=True)
+
+    @app_commands.command(name="채널삭제", description="현재 이미지 피드 채널을 삭제합니다.")
+    async def delete_slash(self, interaction: discord.Interaction):
+        channel_id = interaction.channel_id
+        channel = interaction.channel
+
+        # 피드 실행 중이면 중지
+        if channel_id in self.feeds:
+            await self._stop_feed(channel_id)
+
+        await interaction.response.send_message("🗑️ 채널을 삭제할게요.", ephemeral=True)
+        await asyncio.sleep(1)
         try:
-            await channel.delete(reason="이미지 피드 종료")
+            await channel.delete(reason="이미지 피드 채널 삭제")
         except discord.Forbidden:
             pass
 

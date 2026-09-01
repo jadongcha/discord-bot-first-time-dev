@@ -5,9 +5,9 @@ from pixivpy3 import AppPixivAPI
 
 _api = None
 
-def get_api() -> AppPixivAPI | None:
+def get_api(force_reauth: bool = False) -> AppPixivAPI | None:
     global _api
-    if _api is not None:
+    if _api is not None and not force_reauth:
         return _api
 
     refresh_token = os.getenv("PIXIV_REFRESH_TOKEN")
@@ -100,8 +100,13 @@ async def fetch_batch(query: str, offset: int = 0, safe: bool = True) -> list[di
     try:
         return await loop.run_in_executor(None, _fetch)
     except Exception as e:
-        print(f"[Pixiv] fetch_batch 오류: {e}")
-        return []
+        print(f"[Pixiv] fetch_batch 오류: {e} → 토큰 재인증 시도")
+        get_api(force_reauth=True)
+        try:
+            return await loop.run_in_executor(None, _fetch)
+        except Exception as e2:
+            print(f"[Pixiv] 재시도 실패: {e2}")
+            return []
 
 
 async def search(query: str, safe: bool = True) -> dict | None:
