@@ -7,10 +7,10 @@ from cogs.sources import pixiv
 
 
 class ImageFeed:
-    """채널/스레드 하나에 대한 이미지 피드 상태를 관리합니다."""
+    """채널 하나에 대한 이미지 피드 상태를 관리합니다."""
 
-    def __init__(self, thread: discord.Thread, query: str):
-        self.thread = thread
+    def __init__(self, channel: discord.TextChannel, query: str):
+        self.channel = channel
         self.query = query
         self.seen_ids: set[int] = set()
         self.queue: list[dict] = []
@@ -21,13 +21,13 @@ class ImageFeed:
 class ImageSearch(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.feeds: dict[int, ImageFeed] = {}  # thread_id → ImageFeed
+        self.feeds: dict[int, ImageFeed] = {}  # channel_id → ImageFeed
 
     # ──────────────────────────────────────────
     # 슬래시 명령어
     # ──────────────────────────────────────────
 
-    @app_commands.command(name="이미지", description="사진 포럼에 새 피드를 만들어 5초마다 이미지를 올립니다.")
+    @app_commands.command(name="이미지", description="나만 볼 수 있는 채널을 만들어 5초마다 이미지를 올립니다.")
     @app_commands.describe(검색어="올리고 싶은 캐릭터 이름 또는 컨셉 (예: 에밀리아 리제로)")
     async def image_slash(self, interaction: discord.Interaction, 검색어: str):
         await interaction.response.defer(ephemeral=True)
@@ -37,61 +37,71 @@ class ImageSearch(commands.Cog):
             await interaction.followup.send("서버 안에서만 사용할 수 있어요!", ephemeral=True)
             return
 
-        # "사진" 포럼 채널 찾기
-        forum = discord.utils.get(guild.forums, name="사진")
-        if forum is None:
-            await interaction.followup.send(
-                "❌ '사진' 포럼 채널을 찾을 수 없어요.\n포럼 채널 이름이 정확히 **사진** 인지 확인해주세요!",
-                ephemeral=True
-            )
-            return
-
-        # 포럼에 새 스레드(피드) 생성
+        # 채널 이름 생성
         safe_name = re.sub(r"[^\w가-힣\s]", "", 검색어).strip()
-        thread_name = f"{safe_name} 이미지"[:100]
+        channel_name = f"{safe_name}-이미지"[:100]
+
+        # 나만 볼 수 있는 채널 권한 설정
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+        }
+
+        # "김민서 봇" 카테고리 찾기
+        category = discord.utils.get(guild.categories, name="김민서 봇")
 
         try:
-            thread = await forum.create_thread(
-                name=thread_name,
-                content=f"🔍 **{검색어}** 이미지 피드를 시작합니다!\n멈추려면 `/이미지중지` 를 입력하세요.",
+            channel = await guild.create_text_channel(
+                name=channel_name,
+                overwrites=overwrites,
+                category=category,  # 카테고리 없으면 None → 최상단에 생성
+                topic=f"🖼️ '{검색어}' 이미지 피드 | /이미지중지 로 중지",
+                reason=f"이미지 피드: {검색어}",
             )
         except discord.Forbidden:
             await interaction.followup.send(
-                "❌ 포럼에 스레드를 만들 권한이 없어요. 봇에게 **채널 관리** 권한을 주세요!",
-                ephemeral=True
+                "❌ 채널 생성 권한이 없어요. 봇에게 **채널 관리** 권한을 주세요!", ephemeral=True
             )
             return
 
-        feed = ImageFeed(thread, 검색어)
-        self.feeds[thread.id] = feed
-
+        feed = ImageFeed(channel, 검색어)
+        self.feeds[channel.id] = feed
         feed.task = asyncio.create_task(self._run_feed(feed))
 
         await interaction.followup.send(
-            f"✅ 포럼에 **{검색어}** 피드를 만들었어요!\n멈추려면 그 스레드에서 `/이미지중지` 를 입력하세요.",
+            f"✅ {channel.mention} 채널을 만들었어요! 나만 볼 수 있어요.\n멈추려면 그 채널에서 `/이미지중지` 를 입력하세요.",
             ephemeral=True,
         )
 
-    @app_commands.command(name="이미지중지", description="현재 스레드의 이미지 자동 피드를 중지합니다.")
+    @app_commands.command(name="이미지중지", description="현재 채널의 이미지 자동 피드를 중지합니다.")
     async def stop_slash(self, interaction: discord.Interaction):
         channel_id = interaction.channel_id
         feed = self.feeds.get(channel_id)
 
         if feed is None:
             await interaction.response.send_message(
-                "이 스레드에서 실행 중인 이미지 피드가 없어요.", ephemeral=True
+                "이 채널에서 실행 중인 이미지 피드가 없어요.", ephemeral=True
             )
             return
 
+        channel = interaction.channel
         await self._stop_feed(channel_id)
-        await interaction.response.send_message("⏹️ 이미지 피드를 중지했어요.", ephemeral=True)
+        await interaction.response.send_message("⏹️ 이미지 피드를 중지하고 채널을 삭제할게요.", ephemeral=True)
+        await asyncio.sleep(2)
+        try:
+            await channel.delete(reason="이미지 피드 종료")
+        except discord.Forbidden:
+            pass
 
     # ──────────────────────────────────────────
     # 피드 내부 로직
     # ──────────────────────────────────────────
 
     async def _run_feed(self, feed: ImageFeed):
-        """5초마다 이미지를 가져와서 스레드에 올립니다."""
+        """5초마다 이미지를 가져와서 채널에 올립니다."""
+        await feed.channel.send(f"🔍 **{feed.query}** 이미지 피드를 시작합니다!")
+
         while True:
             try:
                 if not feed.queue:
@@ -99,10 +109,12 @@ class ImageSearch(commands.Cog):
                     feed.offset += 30
 
                     new_items = [item for item in batch if item["id"] not in feed.seen_ids]
+                    # 큐에 이미 있는 것도 제외
+                    queued_ids = {i["id"] for i in feed.queue}
+                    new_items = [item for item in new_items if item["id"] not in queued_ids]
                     feed.queue.extend(new_items)
 
                     if not feed.queue:
-                        # 결과 없으면 처음부터 다시
                         feed.offset = 0
                         feed.seen_ids.clear()
                         await asyncio.sleep(10)
@@ -112,7 +124,7 @@ class ImageSearch(commands.Cog):
                 feed.seen_ids.add(item["id"])
 
                 embed = self._build_embed(item)
-                await feed.thread.send(embed=embed)
+                await feed.channel.send(embed=embed)
 
             except discord.HTTPException as e:
                 print(f"[피드] Discord 오류: {e}")
@@ -123,8 +135,8 @@ class ImageSearch(commands.Cog):
 
             await asyncio.sleep(5)
 
-    async def _stop_feed(self, thread_id: int):
-        feed = self.feeds.pop(thread_id, None)
+    async def _stop_feed(self, channel_id: int):
+        feed = self.feeds.pop(channel_id, None)
         if feed and feed.task:
             feed.task.cancel()
             try:
@@ -153,8 +165,8 @@ class ImageSearch(commands.Cog):
         return embed
 
     async def cog_unload(self):
-        for thread_id in list(self.feeds.keys()):
-            await self._stop_feed(thread_id)
+        for channel_id in list(self.feeds.keys()):
+            await self._stop_feed(channel_id)
 
 
 async def setup(bot: commands.Bot):
